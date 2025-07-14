@@ -53,8 +53,8 @@ static __global__ void SineKern(uchar4 *buf, float time) {
 
   if (x < kTexWidth && y < kTexHeight) {
     float val = sinf(u * kFreq + time) * cosf(v * kFreq + time);
-    auto scaled = uchar3(255 * ((val + 1) / 2));
-    buf[i] = uchar4(scaled.x, scaled.y, scaled.z, 255);
+    unsigned char c = (unsigned char)(255 * ((val + 1) / 2));
+    buf[i] = make_uchar4(c, c, c, 255);
   }
 }
 
@@ -135,7 +135,8 @@ struct Renderer : private boost::noncopyable {
     // use the 2D allocation API to get a better pitch value
     // this should help with the device-to-device copying we perform
     // this buffer will be used by the compute kernel directly
-    HIP_CHECK(hipMallocPitch(&hip_buf_, &pitch_, 4 * kTexWidth, kTexHeight));
+    HIP_CHECK(hipMallocPitch(reinterpret_cast<void **>(&hip_buf_), &pitch_,
+                             4 * kTexWidth, kTexHeight));
   }
 
   void Unmap() {
@@ -169,7 +170,6 @@ struct Renderer : private boost::noncopyable {
 
   ~Renderer() {
     HIP_CHECK(hipStreamSynchronize(gl_stream_));
-    Unmap();
     HIP_CHECK(hipStreamDestroy(gl_stream_));
   }
 };
