@@ -14,20 +14,19 @@ FetchContent_Declare(
     glfw3
     GIT_REPOSITORY    https://github.com/glfw/glfw.git
     GIT_TAG           3.4
-    FIND_PACKAGE_ARGS CONFIG REQUIRED
+    FIND_PACKAGE_ARGS CONFIG
 )
-FetchContent_MakeAvailable(glfw3)
 
-set(BOOST_INCLUDE_LIBRARIES format;scope_exit CACHE STRING "" FORCE)
+set(BOOST_INCLUDE_LIBRARIES core;format;scope_exit CACHE STRING "" FORCE)
 set(BOOST_ENABLE_CMAKE ON CACHE BOOL "" FORCE)
 
 FetchContent_Declare(
     Boost
     GIT_REPOSITORY https://github.com/boostorg/boost.git
     GIT_TAG boost-1.88.0
-    FIND_PACKAGE_ARGS CONFIG REQUIRED
+    # system-installed Boost is more finicky, don't fall back to it
 )
-FetchContent_MakeAvailable(Boost)
+FetchContent_MakeAvailable(Boost glfw3)
 
 set(GPU_RUNTIME "HIP" CACHE STRING "Switches between HIP and CUDA")
 set(GPU_RUNTIMES "HIP" "CUDA")
@@ -61,9 +60,8 @@ endif()
 
 list(APPEND CMAKE_PREFIX_PATH "${ROCM_ROOT}")
 
-set(include_dirs "../../Common" "../../External")
 if(GPU_RUNTIME STREQUAL "CUDA")
-    list(APPEND include_dirs "${ROCM_ROOT}/include")
+    include_directories("${ROCM_ROOT}/include")
 endif()
 
 add_executable(${pname} src/main.hip external/glad/glad.c)
@@ -74,5 +72,5 @@ endif()
 
 set_source_files_properties(src/main.hip PROPERTIES LANGUAGE ${GPU_RUNTIME})
 
-include_directories(external)
-target_link_libraries(${pname} PRIVATE glfw)
+target_include_directories(${pname} PRIVATE external)
+target_link_libraries(${pname} PRIVATE glfw Boost::core Boost::format Boost::scope_exit)
