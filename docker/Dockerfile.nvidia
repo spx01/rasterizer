@@ -1,0 +1,25 @@
+FROM nvidia/cuda:12.9.1-cudnn-devel-ubuntu24.04
+WORKDIR /crast
+
+RUN apt update && apt install -y \
+    wget \
+    cmake \
+    git
+
+RUN wget https://repo.radeon.com/amdgpu-install/6.2.4/ubuntu/noble/amdgpu-install_6.2.60204-1_all.deb
+RUN apt install -y ./amdgpu-install_6.2.60204-1_all.deb
+RUN apt update && apt install -y \
+    hip-runtime-nvidia \
+    hip-dev
+
+ENV PATH="/opt/rocm/bin:$PATH" \
+    HIP_PLATFORM="nvidia"
+
+RUN apt install -y \
+    libglfw3-dev \
+    libboost-all-dev
+
+COPY CMakeLists.txt ./
+COPY src src
+COPY external external
+COPY docker/build_nvidia.sh ./build.sh
