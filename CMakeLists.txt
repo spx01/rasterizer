@@ -24,7 +24,7 @@ FetchContent_Declare(
     Boost
     GIT_REPOSITORY https://github.com/boostorg/boost.git
     GIT_TAG boost-1.88.0
-    # system-installed Boost is more finicky, don't fall back to it
+    FIND_PACKAGE_ARGS CONFIG COMPONENTS core format scope_exit
 )
 FetchContent_MakeAvailable(Boost glfw3)
 
@@ -73,4 +73,5 @@ endif()
 set_source_files_properties(src/main.hip PROPERTIES LANGUAGE ${GPU_RUNTIME})
 
 target_include_directories(${pname} PRIVATE external)
-target_link_libraries(${pname} PRIVATE glfw Boost::core Boost::format Boost::scope_exit)
+target_link_libraries(${pname} PRIVATE glfw )
+target_include_directories(${pname} PRIVATE Boost::core Boost::format Boost::scope_exit)
