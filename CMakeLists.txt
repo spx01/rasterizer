@@ -71,6 +71,8 @@ else()
     find_package(rocthrust REQUIRED CONFIG)
 endif()
 
+find_package(hipcub REQUIRED CONFIG)
+
 
 set(hip_source_files
     src/main.hip
@@ -83,6 +85,10 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_definitions(${pname} PRIVATE
         THRUST_HIP_PRINTF_ENABLED=0
     )
+else()
+    target_compile_definitions(${pname} PRIVATE
+        HIPCUB_STDERR=1
+    )
 endif()
 
 if(UNIX)
@@ -92,9 +98,12 @@ endif()
 set_source_files_properties(${hip_source_files} PROPERTIES LANGUAGE ${GPU_RUNTIME})
 
 target_include_directories(${pname} PRIVATE external)
-target_link_libraries(${pname} PRIVATE glfw)
+target_link_libraries(${pname} PRIVATE glfw hip::hipcub)
 if(GPU_RUNTIME STREQUAL "CUDA")
     target_link_libraries(${pname} PRIVATE Thrust)
+
+    # TODO: investigate source of this problem
+    target_compile_definitions(${pname} PRIVATE CUB_DEPRECATED=)
 else()
     target_link_libraries(${pname} PRIVATE roc::rocprim roc::rocthrust)
 endif()

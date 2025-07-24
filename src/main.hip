@@ -201,10 +201,23 @@ static TestingMesh CreateTestMesh(int w, int h) {
         make_uint4(grid2idx(x0, y0), grid2idx(x1, y1), grid2idx(x2, y2), 0));
   };
 
-  constexpr int kTrigs[][3][2] = {{{1, 1}, {11, 8}, {5, 23}},
-                                  {{7, 12}, {25, 0}, {20, 19}},
-                                  {{12, 22}, {15, 20}, {14, 23}},
-                                  {{1, 27}, {8, 23}, {4, 29}}};
+  // clang-format off
+  constexpr int kTrigs[][3][2] = {
+    // {{ 1,  1}, {11,  8}, { 5, 23}},
+    // {{ 7, 12}, {25,  0}, {20, 19}},
+    // {{12, 22}, {15, 20}, {14, 23}},
+    // {{ 1, 27}, { 8, 23}, { 4, 29}},
+    {{ 0,  0}, { 1,  0}, { 0,  1}},
+    {{ 0,  0}, { 1,  0}, { 0,  1}},
+    {{ 0,  0}, { 1,  0}, { 0,  1}},
+    {{ 0,  0}, { 1,  0}, { 0,  1}},
+    {{ 0,  0}, { 1,  0}, { 0,  1}},
+    {{ 0,  0}, { 1,  0}, { 0,  1}},
+    {{ 0,  0}, { 1,  0}, { 0,  1}},
+    {{ 0,  0}, { 1,  0}, { 0,  1}},
+    {{ 0,  0}, { 1,  0}, { 0,  1}},
+  };
+  // clang-format on
   for (const auto &tri : kTrigs) {
     add_tri(tri[0][0], tri[0][1], tri[1][0], tri[1][1], tri[2][0], tri[2][1]);
   }
@@ -240,7 +253,7 @@ static void TestPipeline() {
 
   HIP_CHECK(hipStreamSynchronize(p.GetStream()));
 
-  std::vector<uint> bins(params.max_binning_batch);
+  std::vector<uint> bins(p.MaxItemsBins());
   HIP_CHECK(hipMemcpy(bins.data(), p.hip_bins_.get(),
                       sizeof(uint) * bins.size(), hipMemcpyDeviceToHost));
   std::vector<uint> bin_counts(p.tile_count_x_ * p.tile_count_y_);

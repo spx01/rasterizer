@@ -2,28 +2,37 @@
 
 #include <thrust/reduce.h>
 
+#include <hipcub/hipcub.hpp>
+
 using namespace pipeline;
 
 Pipeline::Pipeline(const PipelineParams &p) : p_(p) {
-  HIP_CHECK(hipStreamCreate(&stream_));
-  hip_target_buf_ =
-      hutil::DevMallocPitch<uchar4>(buf_pitch_, p_.tex_width, p_.tex_height);
-  hip_bins_ = hutil::DevMalloc<uint>(p_.max_binning_batch);
   tile_count_x_ = hutil::CeilDiv(p_.tex_width, p_.raster_tile_dim);
   tile_count_y_ = hutil::CeilDiv(p_.tex_height, p_.raster_tile_dim);
-  hip_bin_counts_ = hutil::DevMalloc<uint>(tile_count_x_ * tile_count_y_);
-  hip_bin_offsets_ = hutil::DevMalloc<uint>(tile_count_x_ * tile_count_y_);
+  size_t bins_count = tile_count_x_ * tile_count_y_;
+
+  HIP_CHECK(hipStreamCreate(&stream_));
+
+  // TODO: RAII buffer abstraction (or use thrust::device_vector?)
+  hip_target_buf_ =
+      hutil::DevMallocPitch<uchar4>(buf_pitch_, p_.tex_width, p_.tex_height);
+  hip_bins_ = hutil::DevMalloc<uint>(MaxItemsBins());
+  hip_bins_sorted_ = hutil::DevMalloc<uint>(MaxItemsBins());
+  hip_bin_counts_ = hutil::DevMalloc<uint>(bins_count);
+  // the addition of 2 elements is explained in in FeedBinningAsync()
+  hip_bin_offsets_ = hutil::DevMalloc<uint>(bins_count + 2);
+  hip_temp_storage_ = nullptr;
 
   HIP_CHECK(hipMemset2DAsync(hip_target_buf_.get(), buf_pitch_, 0,
                              4 * p_.tex_width, p_.tex_height, stream_));
-  HIP_CHECK(hipMemsetAsync(hip_bins_.get(), 0,
-                           sizeof(uint) * p_.max_binning_batch, stream_));
-  HIP_CHECK(hipMemsetAsync(hip_bin_counts_.get(), 0,
-                           sizeof(uint) * tile_count_x_ * tile_count_y_,
+  HIP_CHECK(hipMemsetAsync(hip_bins_.get(), 0, sizeof(uint) * MaxItemsBins(),
+                           stream_));
+  HIP_CHECK(hipMemsetAsync(hip_bins_sorted_.get(), 0,
+                           sizeof(uint) * MaxItemsBins(), stream_));
+  HIP_CHECK(hipMemsetAsync(hip_bin_counts_.get(), 0, sizeof(uint) * bins_count,
                            stream_));
   HIP_CHECK(hipMemsetAsync(hip_bin_offsets_.get(), 0,
-                           sizeof(uint) * tile_count_x_ * tile_count_y_,
-                           stream_));
+                           sizeof(uint) * (bins_count + 2)));
   HIP_CHECK(hipStreamSynchronize(stream_));
 }
 
@@ -32,7 +41,12 @@ Pipeline::~Pipeline() {
   HIP_CHECK(hipStreamDestroy(stream_));
   HIP_CHECK(hipFree(hip_target_buf_.get()));
   HIP_CHECK(hipFree(hip_bins_.get()));
+  HIP_CHECK(hipFree(hip_bins_sorted_.get()));
   HIP_CHECK(hipFree(hip_bin_counts_.get()));
+  HIP_CHECK(hipFree(hip_bin_offsets_.get()));
+  if (hip_temp_storage_.get() != nullptr) {
+    HIP_CHECK(hipFree(hip_temp_storage_.get()));
+  }
 }
 
 struct BinningKernParams {
@@ -141,13 +155,18 @@ static __global__ void Binning(const BinningKernParams params) {
   }
 }
 
+static void ReallocateDeviceBuffer(device_ptr<void> &ptr, size_t size) {
+  HIP_CHECK(hipFree(ptr.get()));
+  ptr = hutil::DevMalloc<char>(size);
+}
+
 void Pipeline::FeedBinningAsync(const BinningBatch &batch) {
   BinningKernParams p{
       .verts = batch.verts.get(),
       .tri_idxs = batch.tri_idxs.get(),
       .bins = hip_bins_.get(),
       .bin_counts = hip_bin_counts_.get(),
-      .bin_offsets = hip_bin_offsets_.get(),
+      .bin_offsets = nullptr,
       .tris_count = batch.tris_count,
       .dim_in_tiles = make_int2(tile_count_x_, tile_count_y_),
       .tile_dim = p_.raster_tile_dim,
@@ -161,10 +180,42 @@ void Pipeline::FeedBinningAsync(const BinningBatch &batch) {
       <<<num_blocks, kBinningBlockSize, shared_mem_size, stream_>>>(p);
 
   auto nosync_exec_policy = thrust_plat::par.on(stream_);
-  thrust::exclusive_scan(nosync_exec_policy, hip_bin_counts_.get(),
+
+  // this scan is practically an exclusive scan placed at hip_bin_offsets_ + 1,
+  // with an extra element signifying the end offset
+  thrust::inclusive_scan(nosync_exec_policy, hip_bin_counts_.get(),
                          hip_bin_counts_.get() + tile_count_x_ * tile_count_y_,
-                         hip_bin_offsets_.get());
+                         hip_bin_offsets_.get() + 2);
+  // the reason this buffer has an unused first element at this point is because
+  // the following stage 2 invokation of the binning kernel utilizes it as
+  // temporary storage. by the end of this second stage, the provided slice is
+  // effectively shifted by one element to the left, meaning in the end,
+  // hip_bin_offsets_ will contain the offsets at location +0
+  p.bin_offsets = hip_bin_offsets_.get() + 1;
 
   Binning<Binning2>
       <<<num_blocks, kBinningBlockSize, shared_mem_size, stream_>>>(p);
+
+  if (!p_.order_independent) {
+    // sort the triangles in each bin by their index in order to preserve the
+    // stability of the binning
+    size_t temp_storage_bytes = 0;
+
+    HIP_CHECK(hipcub::DeviceSegmentedRadixSort::SortKeys(
+        nullptr, temp_storage_bytes, hip_bins_.get(), hip_bins_sorted_.get(),
+        MaxItemsBins(), tile_count_x_ * tile_count_y_, hip_bin_offsets_.get(),
+        hip_bin_offsets_.get() + 1, 0, 8 * sizeof(uint), stream_));
+
+    if (temp_storage_bytes > temp_storage_bytes_) {
+      ReallocateDeviceBuffer(hip_temp_storage_, temp_storage_bytes);
+      temp_storage_bytes_ = temp_storage_bytes;
+    }
+
+    HIP_CHECK(hipcub::DeviceSegmentedRadixSort::SortKeys(
+        hip_temp_storage_.get(), temp_storage_bytes, hip_bins_.get(),
+        hip_bins_sorted_.get(), MaxItemsBins(), tile_count_x_ * tile_count_y_,
+        hip_bin_offsets_.get(), hip_bin_offsets_.get() + 1, 0, 8 * sizeof(uint),
+        stream_));
+    std::swap(hip_bins_, hip_bins_sorted_);
+  }
 }
