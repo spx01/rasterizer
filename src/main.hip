@@ -6,32 +6,22 @@
 
 #include <hip/hip_gl_interop.h>
 
+#include <thrust/device_free.h>
+#include <thrust/device_malloc.h>
+
 #include <boost/core/noncopyable.hpp>
 #include <boost/format.hpp>
 #include <boost/scope_exit.hpp>
 
 #include <chrono>
 #include <iostream>
+#include <vector>
+
+#include "pipeline.hpp"
 
 using boost::format;
 
 static inline void SoftExit(int code) { throw code; }
-
-#define HIP_CHECK(condition)                                             \
-  {                                                                      \
-    const hipError_t error = condition;                                  \
-    if (error != hipSuccess) {                                           \
-      std::cerr << "hip error encountered: \"" << hipGetErrorName(error) \
-                << "\" at " __FILE__ << ":" << __LINE__ << "\n";         \
-      SoftExit(-1);                                                      \
-    }                                                                    \
-  }
-
-template <typename T>
-__host__ __device__ constexpr auto ceiling_div(const T &dividend,
-                                               const T &divisor) {
-  return (dividend + divisor - 1) / divisor;
-}
 
 constexpr int kTexWidth = 1024;
 constexpr int kTexHeight = 1024;
@@ -54,7 +44,7 @@ static __global__ void SineKern(uchar4 *buf, float time) {
   if (x < kTexWidth && y < kTexHeight) {
     float val = sinf(u * kFreq + time) * cosf(v * kFreq + time);
     unsigned char c = (unsigned char)(255 * ((val + 1) / 2));
-    buf[i] = make_uchar4(c, c, c, 255);
+    buf[i] = make_uchar4(c, 0, 0, 255);
   }
 }
 
@@ -148,8 +138,8 @@ struct Renderer : private boost::noncopyable {
     float time = std::chrono::duration<float, std::chrono::seconds::period>(
                      now - this->start_time_)
                      .count();
-    SineKern<<<dim3(ceiling_div(kTexWidth, kTileSize),
-                    ceiling_div(kTexHeight, kTileSize)),
+    SineKern<<<dim3(hutil::CeilDiv(kTexWidth, kTileSize),
+                    hutil::CeilDiv(kTexHeight, kTileSize)),
                dim3(kTileSize, kTileSize), 0, gl_stream_>>>(hip_buf_, time);
 
     // temporarily map the OpenGL texture as a HIP resource so that we may copy
@@ -173,6 +163,106 @@ struct Renderer : private boost::noncopyable {
     HIP_CHECK(hipStreamDestroy(gl_stream_));
   }
 };
+
+struct TestingMesh {
+  size_t tris_count;
+  device_ptr<float4> verts;
+  device_ptr<uint4> tri_idxs;
+};
+
+template <typename T>
+static device_ptr<T> CreateDeviceBuffer(const std::vector<T> &data) {
+  auto d_buf = hutil::DevMalloc<T>(data.size());
+  HIP_CHECK(hipMemcpy(d_buf.get(), data.data(), data.size() * sizeof(T),
+                      hipMemcpyHostToDevice));
+  return d_buf;
+}
+
+static TestingMesh CreateTestMesh(int w, int h) {
+  constexpr int kGridDim = 32;
+
+  std::vector<float4> verts;
+  verts.reserve(kGridDim * kGridDim);
+
+  float shift_x = static_cast<float>(w) / (2 * kGridDim);
+  float shift_y = static_cast<float>(h) / (2 * kGridDim);
+  for (int y = 0; y < kGridDim; ++y) {
+    for (int x = 0; x < kGridDim; ++x) {
+      float fx = static_cast<float>(x) / kGridDim * w + shift_x;
+      float fy = static_cast<float>(y) / kGridDim * h + shift_y;
+      verts.emplace_back(make_float4(fx, fy, 0.f, 0.f));
+    }
+  }
+
+  std::vector<uint4> tris;
+  auto grid2idx = [](int x, int y) { return y * kGridDim + x; };
+  auto add_tri = [&](int x0, int y0, int x1, int y1, int x2, int y2) {
+    tris.emplace_back(
+        make_uint4(grid2idx(x0, y0), grid2idx(x1, y1), grid2idx(x2, y2), 0));
+  };
+
+  constexpr int kTrigs[][3][2] = {{{1, 1}, {11, 8}, {5, 23}},
+                                  {{7, 12}, {25, 0}, {20, 19}},
+                                  {{12, 22}, {15, 20}, {14, 23}},
+                                  {{1, 27}, {8, 23}, {4, 29}}};
+  for (const auto &tri : kTrigs) {
+    add_tri(tri[0][0], tri[0][1], tri[1][0], tri[1][1], tri[2][0], tri[2][1]);
+  }
+
+  std::cout << format{"created %1% vertices and %2% triangles\n"} %
+                   verts.size() % tris.size();
+
+  return {
+      .tris_count = tris.size(),
+      .verts = CreateDeviceBuffer(verts),
+      .tri_idxs = CreateDeviceBuffer(tris),
+  };
+}
+
+static void TestPipeline() {
+  using namespace pipeline;
+  PipelineParams params{};
+  Pipeline p(params);
+  auto mesh = CreateTestMesh(kTexWidth, kTexHeight);
+
+  BOOST_SCOPE_EXIT(mesh) {
+    HIP_CHECK(hipFree(mesh.verts.get()));
+    HIP_CHECK(hipFree(mesh.tri_idxs.get()));
+  }
+  BOOST_SCOPE_EXIT_END
+
+  BinningBatch batch{
+      .tris_count = mesh.tris_count,
+      .verts = mesh.verts,
+      .tri_idxs = mesh.tri_idxs,
+  };
+  p.FeedBinningAsync(batch);
+
+  HIP_CHECK(hipStreamSynchronize(p.GetStream()));
+
+  std::vector<uint> bins(params.max_binning_batch);
+  HIP_CHECK(hipMemcpy(bins.data(), p.hip_bins_.get(),
+                      sizeof(uint) * bins.size(), hipMemcpyDeviceToHost));
+  std::vector<uint> bin_counts(p.tile_count_x_ * p.tile_count_y_);
+  HIP_CHECK(hipMemcpy(bin_counts.data(), p.hip_bin_counts_.get(),
+                      bin_counts.size() * sizeof(uint), hipMemcpyDeviceToHost));
+
+  int cur_bin = 0;
+  int i = 0;
+  while (i < bins.size() && cur_bin < bin_counts.size()) {
+    int bin_count = bin_counts[cur_bin];
+    if (bin_count == 0) {
+      ++cur_bin;
+      continue;
+    }
+    std::cout << "bin " << cur_bin << ": ";
+    for (int j = 0; j < bin_count; ++j) {
+      std::cout << bins[i++] << " ";
+    }
+    ++cur_bin;
+    std::cout << '\n';
+  }
+}
 
 static int Run() {
   glfwSetErrorCallback([](int code, const char *msg) {
@@ -203,6 +293,8 @@ static int Run() {
   glDisable(GL_LIGHTING);
   glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
   glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+
+  TestPipeline();
 
   while (!glfwWindowShouldClose(g_wnd)) {
     ren.Update();

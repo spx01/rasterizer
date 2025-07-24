@@ -17,7 +17,8 @@ ENV PATH="/opt/rocm/bin:$PATH" \
 
 RUN apt install -y \
     libglfw3-dev \
-    libboost-all-dev
+    libboost-all-dev \
+    libthrust-dev
 
 COPY CMakeLists.txt ./
 COPY src src

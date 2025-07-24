@@ -1,0 +1,16 @@
+FROM rocm/dev-ubuntu-24.04
+WORKDIR /crast
+
+RUN apt update && apt install -y \
+    wget \
+    cmake \
+    git
+
+RUN apt install -y \
+    libglfw3-dev \
+    libboost-all-dev
+
+COPY CMakeLists.txt ./
+COPY src src
+COPY external external
+COPY docker/build_nvidia.sh ./build.sh

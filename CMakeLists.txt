@@ -44,6 +44,8 @@ set(CMAKE_${GPU_RUNTIME}_STANDARD 20)
 set(CMAKE_${GPU_RUNTIME}_EXTENSIONS OFF)
 set(CMAKE_${GPU_RUNTIME}_STANDARD_REQUIRED ON)
 
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 if(WIN32)
     set(ROCM_ROOT
         "$ENV{HIP_PATH}"
@@ -62,16 +64,38 @@ list(APPEND CMAKE_PREFIX_PATH "${ROCM_ROOT}")
 
 if(GPU_RUNTIME STREQUAL "CUDA")
     include_directories("${ROCM_ROOT}/include")
+    find_package(Thrust REQUIRED CONFIG)
+    thrust_create_target(Thrust)
+else()
+    find_package(rocprim REQUIRED CONFIG)
+    find_package(rocthrust REQUIRED CONFIG)
 endif()
 
-add_executable(${pname} src/main.hip external/glad/glad.c)
+
+set(hip_source_files
+    src/main.hip
+    src/pipeline.hip
+)
+
+add_executable(${pname} external/glad/glad.c ${hip_source_files})
+
+if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+    target_compile_definitions(${pname} PRIVATE
+        THRUST_HIP_PRINTF_ENABLED=0
+    )
+endif()
 
 if(UNIX)
     target_link_libraries(${pname} PRIVATE ${CMAKE_DL_LIBS})
 endif()
 
-set_source_files_properties(src/main.hip PROPERTIES LANGUAGE ${GPU_RUNTIME})
+set_source_files_properties(${hip_source_files} PROPERTIES LANGUAGE ${GPU_RUNTIME})
 
 target_include_directories(${pname} PRIVATE external)
-target_link_libraries(${pname} PRIVATE glfw )
+target_link_libraries(${pname} PRIVATE glfw)
+if(GPU_RUNTIME STREQUAL "CUDA")
+    target_link_libraries(${pname} PRIVATE Thrust)
+else()
+    target_link_libraries(${pname} PRIVATE roc::rocprim roc::rocthrust)
+endif()
 target_include_directories(${pname} PRIVATE Boost::core Boost::format Boost::scope_exit)
