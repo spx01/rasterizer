@@ -31,6 +31,10 @@ struct BinningBatch {
   // only the first 3 elements of each triangle are used
   // these represent indices into the vertex buffer
   device_ptr<uint4> tri_idxs;
+
+  // heuristic for what proportion of screen space the average triangle AABB
+  // covers
+  double avg_aabb_coverage = 0.05;
 };
 
 struct Pipeline : boost::noncopyable {

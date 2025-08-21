@@ -77,7 +77,7 @@ enum BinningStages {
   Binning2,      // place the triangles into bins
 };
 
-template <BinningStages Stage>
+template <BinningStages kStage>
 static __global__ void Binning(const BinningKernParams params) {
   extern __shared__ uint block_bin_counts[];
 
@@ -110,30 +110,33 @@ static __global__ void Binning(const BinningKernParams params) {
 
     // update bins of tiles that intersect the bounding box
 
-    // NOTE: this is inefficient due to divergence when areas of the bounding
-    // boxes vary within the same block
+    // TODO: use multiple threads to process a single triangle
 
-    // TODO: change algorithm to use N triangles (2?) per M-thread block, in
-    // order to distribute workload for larger areas
-    for (int ty = min_ty; ty <= max_ty; ++ty) {
-      for (int tx = min_tx; tx <= max_tx; ++tx) {
-        if (tx >= params.dim_in_tiles.x || ty >= params.dim_in_tiles.y) {
-          continue;
-        }
+    const int tile_width = (max_tx - min_tx + 1);
+    const int tile_height = (max_ty - min_ty + 1);
+    const int workload = tile_width * tile_height;
 
+    for (int wi = 0, tx = min_tx, ty = min_ty; wi < workload; ++wi) {
+      if (tx < params.dim_in_tiles.x && ty < params.dim_in_tiles.y) {
         const int bin_idx = ty * params.dim_in_tiles.x + tx;
         atomicAdd(&block_bin_counts[bin_idx], 1);
       }
+
+      if (tx == max_tx) {
+        tx = min_tx - 1;
+        ++ty;
+      }
+      ++tx;
     }
   }
   __syncthreads();
 
-  if constexpr (Stage == Binning1) {
+  if constexpr (kStage == Binning1) {
     // write the block bin counts to global memory
     for (int i = threadIdx.x; i < params.num_bins; i += blockDim.x) {
       atomicAdd(&params.bin_counts[i], block_bin_counts[i]);
     }
-  } else if constexpr (Stage == Binning2) {
+  } else if constexpr (kStage == Binning2) {
     // block_bin_counts will be repurposed to store bin offsets specific to this
     // block
     for (int i = threadIdx.x; i < params.num_bins; i += blockDim.x) {
@@ -146,16 +149,22 @@ static __global__ void Binning(const BinningKernParams params) {
     if (tri_idx < params.tris_count) {
       // iterate over the intersecting tiles again and write the triangle to the
       // global list
-      for (int ty = min_ty; ty <= max_ty; ++ty) {
-        for (int tx = min_tx; tx <= max_tx; ++tx) {
-          if (tx >= params.dim_in_tiles.x || ty >= params.dim_in_tiles.y) {
-            continue;
-          }
+      const int tile_width = (max_tx - min_tx + 1);
+      const int tile_height = (max_ty - min_ty + 1);
+      const int workload = tile_width * tile_height;
 
+      for (int wi = 0, tx = min_tx, ty = min_ty; wi < workload; ++wi) {
+        if (tx < params.dim_in_tiles.x && ty < params.dim_in_tiles.y) {
           const int bin_idx = ty * params.dim_in_tiles.x + tx;
           const uint bin_offset = atomicAdd(&block_bin_counts[bin_idx], 1);
           params.bins[bin_offset] = tri_idx;
         }
+
+        if (tx == max_tx) {
+          tx = min_tx - 1;
+          ++ty;
+        }
+        ++tx;
       }
     }
   }
