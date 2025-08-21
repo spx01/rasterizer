@@ -215,7 +215,7 @@ static TestingMesh CreateTestMesh(int w, int h) {
     {{ 0,  0}, { 1,  0}, { 0,  1}},
     {{ 0,  0}, { 1,  0}, { 0,  1}},
     {{ 0,  0}, { 1,  0}, { 0,  1}},
-    {{ 0,  0}, { 1,  0}, { 0,  1}},
+    {{ 0,  0}, { 1,  0}, { 0,  2}},
   };
   // clang-format on
   for (const auto &tri : kTrigs) {
@@ -251,6 +251,7 @@ static void TestPipeline() {
   };
   p.FeedBinningAsync(batch);
 
+  auto stream = p.GetStream();
   HIP_CHECK(hipStreamSynchronize(p.GetStream()));
 
   std::vector<uint> bins(p.MaxItemsBins());

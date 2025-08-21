@@ -22,6 +22,7 @@ Pipeline::Pipeline(const PipelineParams &p) : p_(p) {
   // the addition of 2 elements is explained in in FeedBinningAsync()
   hip_bin_offsets_ = hutil::DevMalloc<uint>(bins_count + 2);
   hip_temp_storage_ = nullptr;
+  temp_storage_bytes_ = 0;
 
   HIP_CHECK(hipMemset2DAsync(hip_target_buf_.get(), buf_pitch_, 0,
                              4 * p_.tex_width, p_.tex_height, stream_));
@@ -216,7 +217,7 @@ void Pipeline::FeedBinningAsync(const BinningBatch &batch) {
       hip_bin_offsets_.get() + 2, tile_count_x_ * tile_count_y_, stream_));
 
   // the reason this buffer has an unused first element at this point is because
-  // the following stage 2 invokation of the binning kernel utilizes it as
+  // the following stage 2 invocation of the binning kernel utilizes it as
   // temporary storage. by the end of this second stage, the provided slice is
   // effectively shifted by one element to the left, meaning in the end,
   // hip_bin_offsets_ will contain the offsets at location +0
