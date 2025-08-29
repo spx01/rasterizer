@@ -10,6 +10,8 @@
 
 #include <glm/mat4x4.hpp>
 
+#include "glad/glad.h"  // IWYU pragma: keep
+
 #include "device_buffer.hpp"
 #include "hip_util.hpp"
 #include "util.hpp"

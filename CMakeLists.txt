@@ -17,16 +17,17 @@ FetchContent_Declare(
     FIND_PACKAGE_ARGS CONFIG
 )
 
-set(BOOST_INCLUDE_LIBRARIES core;format;scope_exit CACHE STRING "" FORCE)
+set(BOOST_INCLUDE_LIBRARIES core;format;scope_exit;program_options CACHE STRING "" FORCE)
 set(BOOST_ENABLE_CMAKE ON CACHE BOOL "" FORCE)
 
 FetchContent_Declare(
     Boost
     GIT_REPOSITORY https://github.com/boostorg/boost.git
     GIT_TAG boost-1.88.0
-    FIND_PACKAGE_ARGS CONFIG COMPONENTS core format scope_exit
+    FIND_PACKAGE_ARGS CONFIG COMPONENTS core format scope_exit program_options
 )
 
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 FetchContent_Declare(
     glm
     GIT_REPOSITORY https://github.com/g-truc/glm.git
@@ -86,15 +87,30 @@ else ()
     add_compile_options(-Wall -Wextra)
 endif ()
 
-set(hip_source_files
-    src/pipeline.cpp
-)
+# FIXME: this is a hack for IDE compatibility
+if (GPU_RUNTIME STREQUAL "CUDA")
+    set(hip_source_files
+        src/pipeline.cpp
+        src/main.cpp
+        src/app.cpp
+        src/mesh.cpp
+    )
 
-set(cpp_source_files
-    src/main.cpp
-    src/app.cpp
-    src/mesh.cpp
-)
+    set(cpp_source_files
+    )
+else ()
+    set(CMAKE_CXX_COMPILER "hipcc")
+
+    set(hip_source_files
+    )
+
+    set(cpp_source_files
+        src/pipeline.cpp
+        src/main.cpp
+        src/app.cpp
+        src/mesh.cpp
+    )
+endif ()
 
 add_executable(${pname} external/glad/glad.c ${hip_source_files} ${cpp_source_files})
 
@@ -124,4 +140,5 @@ if (GPU_RUNTIME STREQUAL "CUDA")
 else ()
     target_link_libraries(${pname} PRIVATE roc::rocprim roc::rocthrust)
 endif ()
-target_include_directories(${pname} PRIVATE Boost::core Boost::format Boost::scope_exit)
+target_link_libraries(${pname} PRIVATE Boost::program_options)
+target_include_directories(${pname} PRIVATE Boost::core Boost::format Boost::scope_exit Boost::program_options)

@@ -1,5 +1,7 @@
 #include "mesh.hpp"
 
+#include <algorithm>
+
 using namespace mesh;
 
 static std::vector<float4> Widen(std::span<const float3> buf) {

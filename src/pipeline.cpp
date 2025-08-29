@@ -2,6 +2,10 @@
 
 #include "glad/glad.h"
 
+#include <hip/hip_runtime.h>
+
+#include <hip/hip_gl_interop.h>
+
 #include <thrust/reduce.h>
 
 #include <hipcub/hipcub.hpp>
