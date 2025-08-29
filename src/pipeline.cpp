@@ -114,7 +114,7 @@ struct BinningProcessing {
   struct Inputs {
     size_t tri_count;
     const float4 *__restrict__ verts;
-    const uint4 *__restrict__ idxs;
+    const uint4 *__restrict__ tris;
     int2 dim_in_tiles;
     int tile_dim;
     int num_bins;
@@ -163,7 +163,7 @@ static __global__ void BinningProcessingKern(BinningProcessing::Inputs in,
   int min_tx, min_ty, max_tx, max_ty;
 
   if (tri_idx < in.tri_count) {
-    tri = in.idxs[tri_idx];
+    tri = in.tris[tri_idx];
     v0 = make_float2(in.verts[tri.x].x, in.verts[tri.x].y);
     v1 = make_float2(in.verts[tri.y].x, in.verts[tri.y].y);
     v2 = make_float2(in.verts[tri.z].x, in.verts[tri.z].y);
@@ -254,12 +254,12 @@ template <typename T>
 using BinningInPtr = const T *__restrict__;
 
 static void LaunchBinning(Pipeline &p, VertexData<BinningInPtr> verts,
-                          BinningInPtr<uint> idxs, size_t tri_count) {
+                          BinningInPtr<uint4> tris, size_t tri_count) {
   auto &bufs = *p.bufs_;
   BinningProcessing::Inputs in{
       .tri_count = tri_count,
       .verts = verts.positions,
-      .idxs = reinterpret_cast<const uint4 *__restrict__>(idxs),
+      .tris = tris,
       .dim_in_tiles = make_int2(p.tile_count_x_, p.tile_count_y_),
       .tile_dim = p.param_.raster_tile_dim,
       .num_bins = p.tile_count_x_ * p.tile_count_y_,
@@ -324,6 +324,7 @@ static void LaunchBinning(Pipeline &p, VertexData<BinningInPtr> verts,
 struct TileProcessing {
   struct Inputs {
     const float4 *__restrict__ verts;
+    const float4 *__restrict__ colors;
     const uint4 *__restrict__ tri_idxs;
     const uint *__restrict__ bin_offsets;
     const uint *__restrict__ bins;
@@ -337,39 +338,37 @@ struct TileProcessing {
   };
 };
 
-// Test if point p is in triangle v0, v1, v2
+// Compute barycentric coordinates (u,v,w) of point p with respect to triangle
+// v0, v1, v2. Returns true if the point lies inside the triangle (including
+// edges)
 static __device__ bool PointInTriangle(const float2 &p, const float2 &v0,
-                                       const float2 &v1, const float2 &v2) {
+                                       const float2 &v1, const float2 &v2,
+                                       float &u, float &v, float &w) {
+  const float tol = 1e-5F;
   float2 v0v1 = make_float2(v1.x - v0.x, v1.y - v0.y);
   float2 v0v2 = make_float2(v2.x - v0.x, v2.y - v0.y);
   float2 v0p = make_float2(p.x - v0.x, p.y - v0.y);
+  float area = 0.5F * (-v0v2.y * v0v1.x + v0v1.y * v0v2.x);
+  if (area < tol && area > -tol) return false;
+
   float d00 = v0v1.x * v0v1.x + v0v1.y * v0v1.y;
   float d01 = v0v1.x * v0v2.x + v0v1.y * v0v2.y;
   float d11 = v0v2.x * v0v2.x + v0v2.y * v0v2.y;
   float d20 = v0p.x * v0v1.x + v0p.y * v0v1.y;
   float d21 = v0p.x * v0v2.x + v0p.y * v0v2.y;
+
   float denom = d00 * d11 - d01 * d01;
-  if (denom == 0.0F) return false;
-  float v = (d11 * d20 - d01 * d21) / denom;
-  float w = (d00 * d21 - d01 * d20) / denom;
-  float u = 1.0F - v - w;
-  return (u >= 0) && (v >= 0) && (w >= 0);
+  if (denom == 0.0F) return false;  // degenerate triangle
+
+  v = (d11 * d20 - d01 * d21) / denom;
+  w = (d00 * d21 - d01 * d20) / denom;
+  u = 1.0F - v - w;
+
+  return (u >= -tol) && (v >= -tol) && (w >= -tol);
 }
 
-struct TileRastKernParams {
-  uchar4 *target;
-  size_t pitch;
-  int tex_width, tex_height;
-  int tile_dim;
-  int tile_count_x, tile_count_y;
-  const float4 *verts;
-  const uint4 *tri_idxs;
-  const uint *bin_offsets;
-  const uint *bins;
-};
-
-__global__ void TileProcessingKern(TileProcessing::Inputs in,
-                                   TileProcessing::Outputs out) {
+static __global__ void TileProcessingKern(TileProcessing::Inputs in,
+                                          TileProcessing::Outputs out) {
   int tile_x = blockIdx.x;
   int tile_y = blockIdx.y;
   int local_x = threadIdx.x;
@@ -383,6 +382,7 @@ __global__ void TileProcessingKern(TileProcessing::Inputs in,
   uint bin_end = in.bin_offsets[tile_idx + 1];
 
   bool covered = false;
+  float4 interp_col = make_float4(0, 0, 0, 1.0F);
   for (uint i = bin_start; i < bin_end; ++i) {
     uint tri_idx = in.bins[i];
     uint4 tri = in.tri_idxs[tri_idx];
@@ -390,19 +390,35 @@ __global__ void TileProcessingKern(TileProcessing::Inputs in,
     float2 v1 = make_float2(in.verts[tri.y].x, in.verts[tri.y].y);
     float2 v2 = make_float2(in.verts[tri.z].x, in.verts[tri.z].y);
     float2 p = make_float2(px + 0.5F, py + 0.5F);  // center of pixel
-    if (PointInTriangle(p, v0, v1, v2)) {
+    float u, v, w;
+    if (PointInTriangle(p, v0, v1, v2, u, v, w)) {
       covered = true;
+      // interpolate vertex colors using barycentric coordinates
+      float4 c0 = in.colors[tri.x];
+      float4 c1 = in.colors[tri.y];
+      float4 c2 = in.colors[tri.z];
+      interp_col.x = u * c0.x + v * c1.x + w * c2.x;
+      interp_col.y = u * c0.y + v * c1.y + w * c2.y;
+      interp_col.z = u * c0.z + v * c1.z + w * c2.z;
+      interp_col.w = u * c0.w + v * c1.w + w * c2.w;
       break;
     }
   }
-  uchar4 color =
-      covered ? make_uchar4(255, 255, 255, 255) : make_uchar4(0, 0, 0, 255);
-  uchar4 *row =
-      (uchar4 *)((char *)out.target + py * in.target_pitch);  // NOLINT
-  row[px] = color;
+  uchar4 color;
+  if (covered) {
+    auto clampf = [](float x) -> unsigned char {
+      float v = fminf(fmaxf(x, 0.0F), 1.0F);
+      return static_cast<unsigned char>(v * 255.0F);
+    };
+    color = make_uchar4(clampf(interp_col.x), clampf(interp_col.y),
+                        clampf(interp_col.z), clampf(interp_col.w));
+    uchar4 *row =
+        (uchar4 *)((char *)out.target + py * in.target_pitch);  // NOLINT
+    row[px] = color;
+  }
 }
 
-auto &TargetTex(const DrawContext &ctx) {
+static auto &TargetTex(const DrawContext &ctx) {
   return std::get<Resource::TargetTex>(ctx.target->data);
 }
 
@@ -410,6 +426,7 @@ void Pipeline::Begin(DrawContext ctx) {
   StateBufferInit(*this);
   draw_context_ = ctx;
   ClearBinning(*this);
+  bufs_->target.FillBytes(0);
 }
 
 struct VertexProcessing {
@@ -529,6 +546,8 @@ void Pipeline::DrawTrianglesPadded(Handle<kVertexBuffer> vb_h,
       VertexProcessingKern<<<num_blocks, 256, 0, stream_>>>(in, out);
     }
 
+    // No primitive assembly needed
+    auto tris = reinterpret_cast<BinningInPtr<uint4>>(ib.buf.Raw() + start_idx);
     LaunchBinning(*this,
                   VertexData<BinningInPtr>{
                       .positions = bufs_->vert_screen_pos.Raw(),
@@ -536,11 +555,12 @@ void Pipeline::DrawTrianglesPadded(Handle<kVertexBuffer> vb_h,
                       .texcoords = nullptr,
                       .colors = nullptr,
                   },
-                  ib.buf.Raw() + start_idx, batch_tris);
+                  tris, batch_tris);
 
     {
       TileProcessing::Inputs in{
           .verts = bufs_->vert_screen_pos.Raw(),
+          .colors = vb.bufs.colors.Raw(),
           .tri_idxs = reinterpret_cast<const uint4 *__restrict__>(ib.buf.Raw() +
                                                                   start_idx),
           .bin_offsets = bufs_->bin_offsets.Raw(),

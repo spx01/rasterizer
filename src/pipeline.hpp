@@ -116,8 +116,7 @@ struct DrawContext {
 };
 
 struct Pipeline : private boost::noncopyable {
-  // FIXME: change back later
-  static constexpr int kBinningBlockSize = 4;
+  static constexpr int kBinningBlockSize = 256;
 
   Pipeline(const Params &p);
   ~Pipeline();
