@@ -473,9 +473,10 @@ void Pipeline::End() {
   HIP_CHECK(hipGraphicsSubResourceGetMappedArray(&tex_buf,
                                                  target_tex.hip_handle, 0, 0));
 
-  HIP_CHECK(hipMemcpy2DToArrayAsync(
-      tex_buf, 0, 0, bufs_->target.Raw(), bufs_->target_pitch,
-      4 * param_.tex_width, param_.tex_height, hipMemcpyDefault, stream_));
+  HIP_CHECK(hipMemcpy2DToArrayAsync(tex_buf, 0, 0, bufs_->target.Raw(),
+                                    bufs_->target_pitch, 4 * param_.tex_width,
+                                    param_.tex_height, hipMemcpyDeviceToDevice,
+                                    stream_));
 
   HIP_CHECK(hipGraphicsUnmapResources(1, &target_tex.hip_handle, stream_));
   draw_context_ = std::nullopt;

@@ -109,14 +109,14 @@ struct Renderer {
     glBindTexture(GL_TEXTURE_2D, gl_tex_);
 
     glBegin(GL_QUADS);
-    glVertex3f(-0.5F, -0.5F, 0.0F);
     glTexCoord2f(0.0F, 0.0F);
-    glVertex3f(0.5F, -0.5F, 0.0F);
+    glVertex3f(-1.0F, -1.0F, 0.0F);
     glTexCoord2f(1.0F, 0.0F);
-    glVertex3f(0.5F, 0.5F, 0.0F);
+    glVertex3f(1.0F, -1.0F, 0.0F);
     glTexCoord2f(1.0F, 1.0F);
-    glVertex3f(-0.5F, 0.5F, 0.0F);
+    glVertex3f(1.0F, 1.0F, 0.0F);
     glTexCoord2f(0.0F, 1.0F);
+    glVertex3f(-1.0F, 1.0F, 0.0F);
     glEnd();
   }
 };
