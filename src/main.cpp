@@ -1,12 +1,9 @@
 #include "glad/glad.h"
 
-#include <hip/hip_runtime.h>
-
-#include <hip/hip_gl_interop.h>
-
-#include <hip/hip_runtime_api.h>
+#include <GLFW/glfw3.h>
 
 #include <boost/format.hpp>
+#include <boost/program_options.hpp>
 
 #include <glm/ext/matrix_transform.hpp>
 
@@ -19,6 +16,8 @@
 #include "pipeline.hpp"
 
 using boost::format;
+namespace po = boost::program_options;
+using namespace std::chrono_literals;
 
 static int PickHipDev() {
   unsigned int dev_count;
@@ -152,17 +151,37 @@ static bool SecondPassed(App::Timestamp t1, App::Timestamp t2) {
   return t2 - t1 >= std::chrono::seconds(1);
 }
 
-int main() {
+int main(int argc, char **argv) {
+  std::optional<int> quit_after_seconds{};
+  po::options_description desc;
+  desc.add_options()("profile", "run in profiling mode (automatically exits)");
+
+  po::variables_map vm;
+  po::store(po::parse_command_line(argc, argv, desc), vm);
+  po::notify(vm);
+
+  if (vm.count("profile")) {
+    quit_after_seconds = 5;
+    std::cout << "profiling mode\n";
+  }
+
   struct State {
     std::optional<App::Timestamp> last_report;
     int frame_count = 0;
+    GLFWwindow *win = nullptr;
+    App::Timestamp auto_close_time = App::Timestamp::max();
   };
+
   AppBuilder b;
   b.vsync = false;
-  b.on_frame = [b](App &) {
+  b.on_frame = [=](App &app) {
     auto r_ = std::make_shared<Renderer>();
     auto s_ = std::make_shared<State>();
     r_->Init(b.win_width, b.win_height);
+    s_->win = app.window_;
+    if (quit_after_seconds) {
+      s_->auto_close_time = *quit_after_seconds * 1s;
+    }
     return [r_, s_](App::FrameData d) {
       auto &r = *r_;
       auto &s = *s_;
@@ -173,6 +192,9 @@ int main() {
         s.frame_count = 0;
         s.last_report = d.time_now;
         std::cout << format("fps: %d\n") % fps;
+      }
+      if (d.time_now > s_->auto_close_time) {
+        glfwSetWindowShouldClose(s_->win, true);
       }
     };
   };
