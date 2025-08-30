@@ -9,8 +9,9 @@ RUN apt update && apt install -y \
 RUN apt install -y \
     libglfw3-dev \
     libboost-all-dev \
-    librocthrust-dev \
-    libhipcub-dev
+    rocprim-dev \
+    rocthrust-dev \
+    hipcub-dev
 
 COPY CMakeLists.txt ./
 COPY src src
