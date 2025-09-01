@@ -63,12 +63,17 @@ std::unique_ptr<App> AppBuilder::Build() {
 AppBuilder::AppBuilder() : on_frame([](auto &) { return [](auto) {}; }) {}
 
 void App::Run() {
-  auto t0 = std::chrono::steady_clock::now();
+  const auto t0 = Clock::now();
+  last_frame_ = t0;
   while (!glfwWindowShouldClose(window_)) {
-    auto time_passed = std::chrono::steady_clock::now() - t0;
+    const auto now = Clock::now();
+    auto time_passed = now - t0;
+    auto delta = now - last_frame_;
     on_frame_(FrameData{
-        .time_now = std::chrono::duration_cast<std::chrono::milliseconds>(
-            time_passed)});
+        .time_now =
+            std::chrono::duration_cast<std::chrono::milliseconds>(time_passed),
+        .delta_time = delta});
+    last_frame_ = now;
     glfwPollEvents();
     glfwSwapBuffers(window_);
   }

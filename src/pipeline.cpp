@@ -104,7 +104,7 @@ Pipeline::Pipeline(const Params &p)
 }
 
 Pipeline::~Pipeline() {
-  HIP_CHECK(hipStreamSynchronize(stream_));
+  Sync(*this);
   HIP_CHECK(hipStreamDestroy(stream_));
 }
 
@@ -501,7 +501,7 @@ void Pipeline::End() {
 
   HIP_CHECK(hipGraphicsUnmapResources(1, &target_tex.hip_handle, stream_));
   draw_context_ = std::nullopt;
-  HIP_CHECK(hipStreamSynchronize(stream_));
+  Sync(*this);
 }
 
 void Pipeline::Flush() {}
