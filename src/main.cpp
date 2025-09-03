@@ -13,6 +13,7 @@
 
 #include "app.hpp"
 #include "mesh.hpp"
+#include "obj_mesh.hpp"
 #include "pipeline.hpp"
 
 using boost::format;
@@ -48,7 +49,7 @@ struct TestMesh : mesh::Mesh {
     auto pos = std::vector<float3>{};
     auto norm = std::vector<float3>{};
     auto tex = std::vector<float2>{};
-    auto col = std::vector<float4>{};
+    auto col = std::vector<float3>{};
 
     for (int i = 0; i < n_verts; ++i) {
       auto p = positions[i];
@@ -56,7 +57,7 @@ struct TestMesh : mesh::Mesh {
       pos.push_back(make_float3(p[0], p[1], 0.F));
       norm.push_back(make_float3(0.F, 0.F, 1.F));
       tex.push_back(make_float2(0.0F, 0.0F));
-      col.push_back(make_float4(c[0], c[1], c[2], c[3]));
+      col.push_back(make_float3(c[0], c[1], c[2]));
     }
     return mesh::VertexData{
         .positions = std::move(pos),
@@ -111,7 +112,7 @@ struct Renderer {
   GLuint gl_tex_;
   std::unique_ptr<pipeline::Pipeline> pipeline_;
   pipeline::Handle<pipeline::kTargetTexture> target_tex_;
-  TestMesh mesh_;
+  std::unique_ptr<mesh::Mesh> mesh_;
   pipeline::Handle<pipeline::kVertexBuffer> vb_;
   pipeline::Handle<pipeline::kIndexBuffer> ib_;
   int width_, height_;
@@ -123,6 +124,7 @@ struct Renderer {
       : hip_dev_(0),
         gl_tex_(0),
         target_tex_(nullptr),
+        mesh_(std::make_unique<ObjMesh>("assets/teapot.obj", "assets")),
         vb_(nullptr),
         ib_(nullptr),
         width_(0),
@@ -141,16 +143,13 @@ struct Renderer {
         pipeline::Params{.tex_width = width, .tex_height = height});
     target_tex_ = pipeline_->CreateTargetTex();
     gl_tex_ = pipeline_->GetTargetTexGlId(target_tex_);
-    auto h = mesh_.UploadTo(mesh::kTrianglesPadded, *pipeline_);
+    auto h = mesh_->UploadTo(mesh::kTrianglesPadded, *pipeline_);
     vb_ = h.vb;
     ib_ = h.ib;
 
-    const auto id = glm::identity<glm::mat4>();
-    const auto rot =
-        glm::rotate(id, glm::pi<float>() / 4.F, glm::vec3(0.F, 0.F, 1.F));
-    const auto scale = glm::scale(id, glm::vec3(1 / 4.F));
-    const auto trans = glm::translate(id, glm::vec3(0.0F, 0.5F, 0.F));
-    mvp_ = trans * rot * scale;
+    const auto eye = glm::identity<glm::mat4>();
+    const glm::mat4 scale = glm::scale(eye, glm::vec3(0.07F));
+    mvp_ = scale;
   }
 
   void SetGlState() {
@@ -170,15 +169,19 @@ struct Renderer {
     const float t =
         static_cast<float>(time_ms % ms_period) / static_cast<float>(ms_period);
     const float ang0 = t * glm::pi<float>() * 2.F;
+    const int cnt = 5;
 
     pipeline_->Begin(pipeline::DrawContext{.target = target_tex_});
-    for (int i = 0; i < 32; ++i) {
-      const auto ang = glm::pi<float>() / 16.F * static_cast<float>(i);
+    const glm::mat4 trans_y =
+        glm::translate(glm::identity<glm::mat4>(), glm::vec3(0.F, 0.5F, 0.F));
+    for (int i = 0; i < cnt; ++i) {
+      const auto ang = glm::pi<float>() / (static_cast<float>(cnt) / 2) *
+                       static_cast<float>(i);
       const glm::mat4 rot_z = glm::rotate(glm::identity<glm::mat4>(), ang,
                                           glm::vec3(0.F, 0.F, 1.F));
       const glm::mat4 rot_y = glm::rotate(glm::identity<glm::mat4>(),
                                           ang0 + ang, glm::vec3(0.F, 1.F, 0.F));
-      pipeline_->SetMvpMat(rot_z * rot_y * mvp_);
+      pipeline_->SetMvpMat(rot_z * trans_y * rot_y * mvp_);
       pipeline_->DrawTrianglesPadded(vb_, ib_);
     }
     pipeline_->End();

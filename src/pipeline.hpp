@@ -25,6 +25,8 @@ struct Params {
   int max_trig_batch = 0x200;
   int raster_tile_dim = 32;
 
+  size_t max_vertex_buffer_size = 0x100000;
+
   // The texture type is fixed as RGBA8
 
   bool order_independent = false;

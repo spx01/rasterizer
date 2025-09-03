@@ -78,9 +78,9 @@ Pipeline::Pipeline(const Params &p)
   HIP_CHECK(hipStreamCreate(&stream_));
 
   bufs_->vert_screen_pos =
-      DeviceBuffer<float4>(sizeof(float4) * param_.max_trig_batch * 3, stream_);
+      DeviceBuffer<float4>(p.max_vertex_buffer_size * sizeof(float4), stream_);
   bufs_->vert_screen_normal =
-      DeviceBuffer<float4>(sizeof(float4) * param_.max_trig_batch * 3, stream_);
+      DeviceBuffer<float4>(p.max_vertex_buffer_size * sizeof(float4), stream_);
 
   bufs_->bins = DeviceBuffer<uint>(MaxItemsBins(), stream_);
   bufs_->bins_sorted = DeviceBuffer<uint>(MaxItemsBins(), stream_);
@@ -111,7 +111,7 @@ Pipeline::~Pipeline() {
 UniformState::UniformState() { memset(this, 0, sizeof(*this)); }
 
 bool UniformState::operator==(const UniformState &other) const {
-  return memcmp(this, &other, sizeof(*this)) == 0;
+  return memcmp(this, &other, sizeof(*this)) == 0;  // NOLINT
 }
 
 struct BinningProcessing {
@@ -135,10 +135,8 @@ static __host__ __device__ void TriangleBoundingBox(const float2 &v0,
                                                     const float2 &v2,
                                                     int &min_x, int &min_y,
                                                     int &max_x, int &max_y) {
-  // Floor is not needed for minimums, coordinates are positive
-  min_x = (int)fminf(fminf(v0.x, v1.x), v2.x);
-  min_y = (int)fminf(fminf(v0.y, v1.y), v2.y);
-
+  min_x = (int)floorf(fminf(fminf(v0.x, v1.x), v2.x));
+  min_y = (int)floorf(fminf(fminf(v0.y, v1.y), v2.y));
   max_x = (int)ceilf(fmaxf(fmaxf(v0.x, v1.x), v2.x));
   max_y = (int)ceilf(fmaxf(fmaxf(v0.y, v1.y), v2.y));
 }
@@ -345,23 +343,23 @@ struct TileProcessing {
 // Compute barycentric coordinates (u,v,w) of point p with respect to triangle
 // v0, v1, v2. Returns true if the point lies inside the triangle (including
 // edges)
-static __device__ bool PointInTriangle(const float2 &p, const float2 &v0,
-                                       const float2 &v1, const float2 &v2,
-                                       float &u, float &v, float &w) {
+static __device__ bool PointInTriangle2D(const float2 &p, const float2 &v0,
+                                         const float2 &v1, const float2 &v2,
+                                         float &u, float &v, float &w) {
   const float tol = 1e-5F;
-  float2 v0v1 = make_float2(v1.x - v0.x, v1.y - v0.y);
-  float2 v0v2 = make_float2(v2.x - v0.x, v2.y - v0.y);
-  float2 v0p = make_float2(p.x - v0.x, p.y - v0.y);
-  float area = 0.5F * (-v0v2.y * v0v1.x + v0v1.y * v0v2.x);
+  const float2 v0v1 = make_float2(v1.x - v0.x, v1.y - v0.y);
+  const float2 v0v2 = make_float2(v2.x - v0.x, v2.y - v0.y);
+  const float2 v0p = make_float2(p.x - v0.x, p.y - v0.y);
+  const float area = 0.5F * (-v0v2.y * v0v1.x + v0v1.y * v0v2.x);
   if (area < tol && area > -tol) return false;
 
-  float d00 = v0v1.x * v0v1.x + v0v1.y * v0v1.y;
-  float d01 = v0v1.x * v0v2.x + v0v1.y * v0v2.y;
-  float d11 = v0v2.x * v0v2.x + v0v2.y * v0v2.y;
-  float d20 = v0p.x * v0v1.x + v0p.y * v0v1.y;
-  float d21 = v0p.x * v0v2.x + v0p.y * v0v2.y;
+  const float d00 = v0v1.x * v0v1.x + v0v1.y * v0v1.y;
+  const float d01 = v0v1.x * v0v2.x + v0v1.y * v0v2.y;
+  const float d11 = v0v2.x * v0v2.x + v0v2.y * v0v2.y;
+  const float d20 = v0p.x * v0v1.x + v0p.y * v0v1.y;
+  const float d21 = v0p.x * v0v2.x + v0p.y * v0v2.y;
 
-  float denom = d00 * d11 - d01 * d01;
+  const float denom = d00 * d11 - d01 * d01;
   if (denom == 0.0F) return false;  // degenerate triangle
 
   v = (d11 * d20 - d01 * d21) / denom;
@@ -371,54 +369,73 @@ static __device__ bool PointInTriangle(const float2 &p, const float2 &v0,
   return (u >= -tol) && (v >= -tol) && (w >= -tol);
 }
 
+static __device__ float4 InterpBarycentricF4(const float4 &c0, const float4 &c1,
+                                             const float4 &c2, float u, float v,
+                                             float w) {
+  return make_float4(
+      u * c0.x + v * c1.x + w * c2.x, u * c0.y + v * c1.y + w * c2.y,
+      u * c0.z + v * c1.z + w * c2.z, u * c0.w + v * c1.w + w * c2.w);
+}
+
+static __device__ uchar FloatClampByte(float f) {
+  return f < 0.F ? 0 : (f > 1.0F ? 255 : static_cast<uchar>(f * 255.F));
+}
+
+static __device__ uchar4 QuantizeColor(float4 c) {
+  return make_uchar4(FloatClampByte(c.x), FloatClampByte(c.y),
+                     FloatClampByte(c.z), FloatClampByte(c.w));
+}
+
 static __global__ void TileProcessingKern(TileProcessing::Inputs in,
                                           TileProcessing::Outputs out) {
-  int tile_x = blockIdx.x;
-  int tile_y = blockIdx.y;
-  int local_x = threadIdx.x;
-  int local_y = threadIdx.y;
-  int px = tile_x * in.tile_dim + local_x;
-  int py = tile_y * in.tile_dim + local_y;
+  const int tile_x = blockIdx.x;
+  const int tile_y = blockIdx.y;
+  const int local_x = threadIdx.x;
+  const int local_y = threadIdx.y;
+  const int px = tile_x * in.tile_dim + local_x;
+  const int py = tile_y * in.tile_dim + local_y;
   if (px >= in.tex_width || py >= in.tex_height) return;
 
-  int tile_idx = tile_y * in.dim_in_tiles.x + tile_x;
-  uint bin_start = in.bin_offsets[tile_idx];
-  uint bin_end = in.bin_offsets[tile_idx + 1];
+  const uint tile_idx = tile_y * in.dim_in_tiles.x + tile_x;
+  const uint bin_start = in.bin_offsets[tile_idx];
+  const uint bin_end = in.bin_offsets[tile_idx + 1];
 
   bool covered = false;
   float4 interp_col = make_float4(0, 0, 0, 1.0F);
+  float4 color;
+
   for (uint i = bin_start; i < bin_end; ++i) {
-    uint tri_idx = in.bins[i];
-    uint4 tri = in.tri_idxs[tri_idx];
-    float2 v0 = make_float2(in.verts[tri.x].x, in.verts[tri.x].y);
-    float2 v1 = make_float2(in.verts[tri.y].x, in.verts[tri.y].y);
-    float2 v2 = make_float2(in.verts[tri.z].x, in.verts[tri.z].y);
-    float2 p = make_float2(px + 0.5F, py + 0.5F);  // center of pixel
+    const uint tri_idx = in.bins[i];
+    const uint4 tri = in.tri_idxs[tri_idx];
+    const float2 v0 = make_float2(in.verts[tri.x].x, in.verts[tri.x].y);
+    const float2 v1 = make_float2(in.verts[tri.y].x, in.verts[tri.y].y);
+    const float2 v2 = make_float2(in.verts[tri.z].x, in.verts[tri.z].y);
+    const float2 p = make_float2(px + 0.5F, py + 0.5F);  // center of pixel
     float u, v, w;
-    if (PointInTriangle(p, v0, v1, v2, u, v, w)) {
-      covered = true;
+    if (PointInTriangle2D(p, v0, v1, v2, u, v, w)) {
+      const float depth =
+          u * in.verts[tri.x].z + v * in.verts[tri.y].z + w * in.verts[tri.z].z;
+
       // interpolate vertex colors using barycentric coordinates
-      float4 c0 = in.colors[tri.x];
-      float4 c1 = in.colors[tri.y];
-      float4 c2 = in.colors[tri.z];
-      interp_col.x = u * c0.x + v * c1.x + w * c2.x;
-      interp_col.y = u * c0.y + v * c1.y + w * c2.y;
-      interp_col.z = u * c0.z + v * c1.z + w * c2.z;
-      interp_col.w = u * c0.w + v * c1.w + w * c2.w;
-      break;
+      const float4 c0 = in.colors[tri.x];
+      const float4 c1 = in.colors[tri.y];
+      const float4 c2 = in.colors[tri.z];
+
+      // TODO: depth-correct interpolation
+      interp_col = InterpBarycentricF4(c0, c1, c2, u, v, w);
+
+      // TODO: configurable blending
+      if (depth >= 0.F && depth <= 1.0F) {
+        covered = true;
+        color = interp_col;
+      }
     }
   }
-  uchar4 color;
+
   if (covered) {
-    auto clampf = [](float x) -> unsigned char {
-      float v = fminf(fmaxf(x, 0.0F), 1.0F);
-      return static_cast<unsigned char>(v * 255.0F);
-    };
-    color = make_uchar4(clampf(interp_col.x), clampf(interp_col.y),
-                        clampf(interp_col.z), clampf(interp_col.w));
-    uchar4 *row =
+    uchar4 *const row =
         (uchar4 *)((char *)out.target + py * in.target_pitch);  // NOLINT
-    row[px] = color;
+    row[px] = QuantizeColor(color);
   }
 }
 
@@ -466,19 +483,19 @@ static __device__ float3 operator*(const Mat3 &m, const float3 &v) {
 }
 
 static __device__ float4 ToScreen(const float4 &p, const int2 &dim) {
-  return make_float4(p.x / p.w * dim.x / 2 + dim.x / 2,
-                     p.y / p.w * dim.y / 2 + dim.y / 2, p.z, 1.0F);
+  return make_float4(p.x / p.w * dim.x / 2 + dim.x / 2.F,
+                     p.y / p.w * dim.y / 2 + dim.y / 2.F, p.z / p.w + 0.5F,
+                     1.0F);
 }
 
 static __global__ void VertexProcessingKern(VertexProcessing::Inputs in,
                                             VertexProcessing::Outputs out) {
   const int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < in.vert_count) {
-    const uint vertex_idx = in.indices[idx];
-    const float4 pos_raw = in.positions[vertex_idx];
-    const auto pos = float4(pos_raw.x, pos_raw.y, pos_raw.z, 1.0F);
-    const float4 normal_raw = in.normals[vertex_idx];
-    const auto normal = float3(normal_raw.x, normal_raw.y, normal_raw.z);
+    const float4 pos_raw = in.positions[idx];
+    const auto pos = make_float4(pos_raw.x, pos_raw.y, pos_raw.z, 1.0F);
+    const float4 normal_raw = in.normals[idx];
+    const auto normal = make_float3(normal_raw.x, normal_raw.y, normal_raw.z);
     const auto pos_t = in.uniform_state.mvp_mat * pos;
     const auto normal_t = in.uniform_state.normal_mat * normal;
     out.positions[idx] = ToScreen(pos_t, in.screen_dim);
@@ -524,31 +541,32 @@ void Pipeline::DrawTrianglesPadded(Handle<kVertexBuffer> vb_h,
   const UniformState &uniforms = StateBufferCommit(*this);
   size_t vert_count = ib.buf.size;
   assert(vert_count % 4 == 0);
+  const size_t unique_vert_count = vb.bufs.positions.size;
+
+  {
+    VertexProcessing::Inputs in{
+        .uniform_state = uniforms,
+        .positions = vb.bufs.positions.Raw(),
+        .normals = vb.bufs.normals.Raw(),
+        .indices = ib.buf.Raw(),
+        .vert_count = unique_vert_count,
+        .screen_dim = make_int2(param_.tex_width, param_.tex_height),
+    };
+    VertexProcessing::Outputs out{
+        .positions = bufs_->vert_screen_pos.Raw(),
+        .normals = bufs_->vert_screen_normal.Raw(),
+    };
+
+    int num_blocks =
+        hutil::CeilDiv(unique_vert_count, static_cast<size_t>(256));
+    VertexProcessingKern<<<num_blocks, 256, 0, stream_>>>(in, out);
+  }
 
   for (size_t start_idx = 0; start_idx < vert_count;
        start_idx += param_.max_trig_batch * 4) {
     size_t end_idx =
         std::min(start_idx + param_.max_trig_batch * 4, vert_count);
-    size_t batch_verts = end_idx - start_idx;
-    size_t batch_tris = batch_verts / 4;
-
-    {
-      VertexProcessing::Inputs in{
-          .uniform_state = uniforms,
-          .positions = vb.bufs.positions.Raw(),
-          .normals = vb.bufs.normals.Raw(),
-          .indices = ib.buf.Raw() + start_idx,
-          .vert_count = batch_verts,
-          .screen_dim = make_int2(param_.tex_width, param_.tex_height),
-      };
-      VertexProcessing::Outputs out{
-          .positions = bufs_->vert_screen_pos.Raw(),
-          .normals = bufs_->vert_screen_normal.Raw(),
-      };
-
-      int num_blocks = hutil::CeilDiv(batch_verts, static_cast<size_t>(256));
-      VertexProcessingKern<<<num_blocks, 256, 0, stream_>>>(in, out);
-    }
+    size_t batch_tris = (end_idx - start_idx) / 4;
 
     // No primitive assembly needed
     auto tris = reinterpret_cast<BinningInPtr<uint4>>(ib.buf.Raw() + start_idx);
@@ -607,6 +625,7 @@ Handle<kTargetTexture> Pipeline::CreateTargetTex() {
 }
 
 Handle<kVertexBuffer> Pipeline::UploadVertexBuffer(VertexData<CSpan> verts) {
+  assert(verts.positions.size() <= bufs_->vert_screen_normal.size);
   auto &res = *res_.Create();
   res.data = Resource::VertexBuffer{
       .bufs = {

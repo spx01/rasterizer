@@ -9,7 +9,7 @@ struct VertexData {
   buf::Buf<float3> positions;
   buf::Buf<float3> normals;
   buf::Buf<float2> texcoords;
-  buf::Buf<float4> colors;
+  buf::Buf<float3> colors;
 };
 
 enum UploadMode {

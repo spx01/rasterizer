@@ -94,6 +94,7 @@ if (GPU_RUNTIME STREQUAL "CUDA")
         src/main.cpp
         src/app.cpp
         src/mesh.cpp
+        src/obj_mesh.cpp
     )
 
     set(cpp_source_files
@@ -109,10 +110,11 @@ else ()
         src/main.cpp
         src/app.cpp
         src/mesh.cpp
+        src/obj_mesh.cpp
     )
 endif ()
 
-add_executable(${pname} external/glad/glad.c ${hip_source_files} ${cpp_source_files})
+add_executable(${pname} external/glad/glad.c external/tiny_obj_loader.cpp ${hip_source_files} ${cpp_source_files})
 
 if (NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_definitions(${pname} PRIVATE

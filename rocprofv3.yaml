@@ -1,0 +1,19 @@
+{
+  "jobs": [
+    {
+      "output_directory": "profile-out",
+      "output_file": "out",
+      "output_format": ["pftrace"],
+      "log_level": "env",
+      "runtime_trace": true,
+      "kernel_rename": true,
+      "kernel_trace": true,
+      "memory_copy_trace": true,
+      "memory_allocation_trace": true,
+      "summary": true,
+      "summary_per_domain": true,
+      "summary_groups": ["KERNEL_DISPATCH|MEMORY_COPY"],
+      "summary_output_file": "summary"
+    }
+  ]
+}
