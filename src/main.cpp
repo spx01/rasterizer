@@ -2,6 +2,10 @@
 
 #include <GLFW/glfw3.h>
 
+#include <hip/hip_runtime.h>
+
+#include <hip/hip_gl_interop.h>
+
 #include <boost/format.hpp>
 #include <boost/program_options.hpp>
 
@@ -192,8 +196,9 @@ struct Renderer {
                                           glm::vec3(0.F, 0.F, 1.F));
       const glm::mat4 rot_y = glm::rotate(glm::identity<glm::mat4>(),
                                           ang0 + ang, glm::vec3(0.F, 1.F, 0.F));
-      pipeline_->SetMvpMat(rot_z * trans_y * rot_y * mv_mat_);
-      pipeline_->SetNormalMat(NormalTransformMat(mv_mat_));
+      auto m = rot_z * trans_y * rot_y * mv_mat_;
+      pipeline_->SetMvpMat(m);
+      pipeline_->SetNormalMat(NormalTransformMat(m));
       pipeline_->DrawTrianglesPadded(vb_, ib_);
     }
     pipeline_->End();
