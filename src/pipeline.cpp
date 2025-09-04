@@ -36,6 +36,8 @@ struct Pipeline::Buffers {
 
   DeviceBuffer<uchar4> target;
   size_t target_pitch;
+  DeviceBuffer<float> depth;
+  size_t depth_pitch;
 };
 
 static void Sync(Pipeline &p) { HIP_CHECK(hipStreamSynchronize(p.stream_)); }
@@ -99,6 +101,15 @@ Pipeline::Pipeline(const Params &p)
             param_.tex_width * sizeof(uchar4), param_.tex_height));
         assert(bufs_->target_pitch % sizeof(uchar4) == 0);
         return bufs_->target_pitch / sizeof(uchar4) * param_.tex_height;
+      },
+      stream_);
+  bufs_->depth = DeviceBuffer<float>(
+      [&](device_ptr<float> &p) {
+        HIP_CHECK(hipMallocPitch(
+            reinterpret_cast<void **>(&p), &bufs_->depth_pitch,
+            param_.tex_width * sizeof(float), param_.tex_height));
+        assert(bufs_->depth_pitch % sizeof(float) == 0);
+        return bufs_->depth_pitch / sizeof(float) * param_.tex_height;
       },
       stream_);
 }
@@ -327,6 +338,7 @@ struct TileProcessing {
   struct Inputs {
     const float4 *__restrict__ verts;
     const float4 *__restrict__ colors;
+    const float4 *__restrict__ normals;
     const uint4 *__restrict__ tri_idxs;
     const uint *__restrict__ bin_offsets;
     const uint *__restrict__ bins;
@@ -334,9 +346,11 @@ struct TileProcessing {
     int2 dim_in_tiles;
     int tex_width, tex_height;
     size_t target_pitch;
+    size_t depth_pitch;
   };
   struct Outputs {
     uchar4 *__restrict__ target;
+    float *__restrict__ depth;  // This is actually an input as well
   };
 };
 
@@ -352,6 +366,11 @@ static __device__ bool PointInTriangle2D(const float2 &p, const float2 &v0,
   const float2 v0p = make_float2(p.x - v0.x, p.y - v0.y);
   const float area = 0.5F * (-v0v2.y * v0v1.x + v0v1.y * v0v2.x);
   if (area < tol && area > -tol) return false;
+
+  // TODO: configurable backface behavior
+  if (area < 0.F) {
+    return false;
+  }
 
   const float d00 = v0v1.x * v0v1.x + v0v1.y * v0v1.y;
   const float d01 = v0v1.x * v0v2.x + v0v1.y * v0v2.y;
@@ -369,12 +388,31 @@ static __device__ bool PointInTriangle2D(const float2 &p, const float2 &v0,
   return (u >= -tol) && (v >= -tol) && (w >= -tol);
 }
 
-static __device__ float4 InterpBarycentricF4(const float4 &c0, const float4 &c1,
-                                             const float4 &c2, float u, float v,
-                                             float w) {
-  return make_float4(
-      u * c0.x + v * c1.x + w * c2.x, u * c0.y + v * c1.y + w * c2.y,
-      u * c0.z + v * c1.z + w * c2.z, u * c0.w + v * c1.w + w * c2.w);
+static __device__ float4 InterpBarycentricF4Persp(const float4 &c0,
+                                                  const float4 &c1,
+                                                  const float4 &c2, float u,
+                                                  float v, float w, float q0,
+                                                  float q1, float q2) {
+  const float qi = u * q0 + v * q1 + w * q2;
+  if (qi == 0.F) return make_float4(0.F, 0.F, 0.F, 0.F);
+  const float4 ci = make_float4(u * c0.x * q0 + v * c1.x * q1 + w * c2.x * q2,
+                                u * c0.y * q0 + v * c1.y * q1 + w * c2.y * q2,
+                                u * c0.z * q0 + v * c1.z * q1 + w * c2.z * q2,
+                                u * c0.w * q0 + v * c1.w * q1 + w * c2.w * q2);
+  return make_float4(ci.x / qi, ci.y / qi, ci.z / qi, ci.w / qi);
+}
+
+static __device__ float3 InterpBarycentricF3Persp(const float3 &c0,
+                                                  const float3 &c1,
+                                                  const float3 &c2, float u,
+                                                  float v, float w, float q0,
+                                                  float q1, float q2) {
+  const float qi = u * q0 + v * q1 + w * q2;
+  if (qi == 0.F) return make_float3(0.F, 0.F, 0.F);
+  const float3 ci = make_float3(u * c0.x * q0 + v * c1.x * q1 + w * c2.x * q2,
+                                u * c0.y * q0 + v * c1.y * q1 + w * c2.y * q2,
+                                u * c0.z * q0 + v * c1.z * q1 + w * c2.z * q2);
+  return make_float3(ci.x / qi, ci.y / qi, ci.z / qi);
 }
 
 static __device__ uchar FloatClampByte(float f) {
@@ -386,15 +424,34 @@ static __device__ uchar4 QuantizeColor(float4 c) {
                      FloatClampByte(c.z), FloatClampByte(c.w));
 }
 
+static __device__ float4 Normalize(const float4 v) {
+  float len = sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
+  if (len > 0.F) {
+    return make_float4(v.x / len, v.y / len, v.z / len, v.w);
+  }
+  return make_float4(0.F, 0.F, 0.F, v.w);
+}
+
 static __global__ void TileProcessingKern(TileProcessing::Inputs in,
                                           TileProcessing::Outputs out) {
+  // TODO: proper parameter
+  constexpr bool skip_depth_test = false;
+
+  extern __shared__ float depth_buffer[];
+
   const int tile_x = blockIdx.x;
   const int tile_y = blockIdx.y;
   const int local_x = threadIdx.x;
   const int local_y = threadIdx.y;
+  const int local_id = local_y * in.tile_dim + local_x;
   const int px = tile_x * in.tile_dim + local_x;
   const int py = tile_y * in.tile_dim + local_y;
   if (px >= in.tex_width || py >= in.tex_height) return;
+
+  // Load the depth buffer from the last batch
+  float *const global_depth =
+      (float *)((char *)out.depth + py * in.depth_pitch) + px;  // NOLINT
+  depth_buffer[local_id] = *global_depth;
 
   const uint tile_idx = tile_y * in.dim_in_tiles.x + tile_x;
   const uint bin_start = in.bin_offsets[tile_idx];
@@ -407,27 +464,42 @@ static __global__ void TileProcessingKern(TileProcessing::Inputs in,
   for (uint i = bin_start; i < bin_end; ++i) {
     const uint tri_idx = in.bins[i];
     const uint4 tri = in.tri_idxs[tri_idx];
-    const float2 v0 = make_float2(in.verts[tri.x].x, in.verts[tri.x].y);
-    const float2 v1 = make_float2(in.verts[tri.y].x, in.verts[tri.y].y);
-    const float2 v2 = make_float2(in.verts[tri.z].x, in.verts[tri.z].y);
+    const float4 v0_raw = in.verts[tri.x];
+    const float4 v1_raw = in.verts[tri.y];
+    const float4 v2_raw = in.verts[tri.z];
+    const float2 v0 = make_float2(v0_raw.x, v0_raw.y);
+    const float2 v1 = make_float2(v1_raw.x, v1_raw.y);
+    const float2 v2 = make_float2(v2_raw.x, v2_raw.y);
     const float2 p = make_float2(px + 0.5F, py + 0.5F);  // center of pixel
     float u, v, w;
     if (PointInTriangle2D(p, v0, v1, v2, u, v, w)) {
-      const float depth =
-          u * in.verts[tri.x].z + v * in.verts[tri.y].z + w * in.verts[tri.z].z;
+      const float depth = u * v0_raw.z + v * v1_raw.z + w * v2_raw.z;
 
-      // interpolate vertex colors using barycentric coordinates
+      // Interpolate vertex colors using barycentric coordinates
       const float4 c0 = in.colors[tri.x];
       const float4 c1 = in.colors[tri.y];
       const float4 c2 = in.colors[tri.z];
 
-      // TODO: depth-correct interpolation
-      interp_col = InterpBarycentricF4(c0, c1, c2, u, v, w);
+      interp_col =
+          InterpBarycentricF4Persp(c0, c1, c2, u, v, w, in.verts[tri.x].w,
+                                   in.verts[tri.y].w, in.verts[tri.z].w);
 
-      // TODO: configurable blending
-      if (depth >= 0.F && depth <= 1.0F) {
+      // TODO: blending
+      // TODO: clipping stage
+      if (depth >= 0.F && depth <= 1.0F &&
+          (skip_depth_test || depth < depth_buffer[local_id])) {
         covered = true;
         color = interp_col;
+        depth_buffer[local_id] = depth;
+
+        // FIXME: placeholder demo
+        color = Normalize(InterpBarycentricF4Persp(
+            in.normals[tri.x], in.normals[tri.y], in.normals[tri.z], u, v, w,
+            in.verts[tri.x].w, in.verts[tri.y].w, in.verts[tri.z].w));
+        color.x = fabsf(color.x);
+        color.y = fabsf(color.y);
+        color.z = fabsf(color.z);
+        color.w = 1.F;
       }
     }
   }
@@ -436,6 +508,11 @@ static __global__ void TileProcessingKern(TileProcessing::Inputs in,
     uchar4 *const row =
         (uchar4 *)((char *)out.target + py * in.target_pitch);  // NOLINT
     row[px] = QuantizeColor(color);
+
+    if (!skip_depth_test) {
+      // Write the depth buffer back to global memory
+      *global_depth = depth_buffer[local_id];
+    }
   }
 }
 
@@ -448,6 +525,10 @@ void Pipeline::Begin(DrawContext ctx) {
   draw_context_ = ctx;
   ClearBinning(*this);
   bufs_->target.FillBytes(0);
+
+  // 0x42424242 > 1.F
+  constexpr uint8_t k_magic_spray = 0x42;
+  bufs_->depth.FillBytes(k_magic_spray);
 }
 
 struct VertexProcessing {
@@ -485,7 +566,8 @@ static __device__ float3 operator*(const Mat3 &m, const float3 &v) {
 static __device__ float4 ToScreen(const float4 &p, const int2 &dim) {
   return make_float4(p.x / p.w * dim.x / 2 + dim.x / 2.F,
                      p.y / p.w * dim.y / 2 + dim.y / 2.F, p.z / p.w + 0.5F,
-                     1.0F);
+                     // store q = 1/w in w for perspective-correct interpolation
+                     1 / p.w);
 }
 
 static __global__ void VertexProcessingKern(VertexProcessing::Inputs in,
@@ -499,7 +581,8 @@ static __global__ void VertexProcessingKern(VertexProcessing::Inputs in,
     const auto pos_t = in.uniform_state.mvp_mat * pos;
     const auto normal_t = in.uniform_state.normal_mat * normal;
     out.positions[idx] = ToScreen(pos_t, in.screen_dim);
-    out.normals[idx] = make_float4(normal_t.x, normal_t.y, normal_t.z, 0.F);
+    out.normals[idx] =
+        Normalize(make_float4(normal_t.x, normal_t.y, normal_t.z, 1.F));
   }
 }
 
@@ -583,6 +666,7 @@ void Pipeline::DrawTrianglesPadded(Handle<kVertexBuffer> vb_h,
       TileProcessing::Inputs in{
           .verts = bufs_->vert_screen_pos.Raw(),
           .colors = vb.bufs.colors.Raw(),
+          .normals = bufs_->vert_screen_normal.Raw(),
           .tri_idxs = reinterpret_cast<const uint4 *__restrict__>(ib.buf.Raw() +
                                                                   start_idx),
           .bin_offsets = bufs_->bin_offsets.Raw(),
@@ -592,13 +676,17 @@ void Pipeline::DrawTrianglesPadded(Handle<kVertexBuffer> vb_h,
           .tex_width = param_.tex_width,
           .tex_height = param_.tex_height,
           .target_pitch = bufs_->target_pitch,
+          .depth_pitch = bufs_->depth_pitch,
       };
       TileProcessing::Outputs out{
           .target = bufs_->target.Raw(),
+          .depth = bufs_->depth.Raw(),
       };
+      const size_t shared_mem_size =
+          param_.raster_tile_dim * param_.raster_tile_dim * sizeof(float);
       TileProcessingKern<<<dim3(tile_count_x_, tile_count_y_),
                            dim3(param_.raster_tile_dim, param_.raster_tile_dim),
-                           0, stream_>>>(in, out);
+                           shared_mem_size, stream_>>>(in, out);
     }
   }
 }

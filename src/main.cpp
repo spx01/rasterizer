@@ -72,6 +72,14 @@ struct TestMesh : mesh::Mesh {
   }
 };
 
+static glm::mat3x3 InverseTranspose(const glm::mat3x3 &m) {
+  return glm::transpose(glm::inverse(m));
+}
+
+static glm::mat3x3 NormalTransformMat(const glm::mat4x4 &mv_mat) {
+  return InverseTranspose(glm::mat3x3(mv_mat));
+}
+
 struct FrameStats {
   using Dt = chrono::duration<double, std::milli>;
   std::vector<Dt> frame_times_;
@@ -116,7 +124,8 @@ struct Renderer {
   pipeline::Handle<pipeline::kVertexBuffer> vb_;
   pipeline::Handle<pipeline::kIndexBuffer> ib_;
   int width_, height_;
-  glm::mat4 mvp_;
+  glm::mat4 mv_mat_;
+  glm::mat4 proj_mat_;
   FrameStats stats_;
   bool collect_stats_;
 
@@ -124,12 +133,13 @@ struct Renderer {
       : hip_dev_(0),
         gl_tex_(0),
         target_tex_(nullptr),
-        mesh_(std::make_unique<ObjMesh>("assets/teapot.obj", "assets")),
+        mesh_(std::make_unique<ObjMesh>("assets/suzanne.obj", "assets")),
         vb_(nullptr),
         ib_(nullptr),
         width_(0),
         height_(0),
-        mvp_(),
+        mv_mat_(),
+        proj_mat_(),
         collect_stats_(collect_stats) {}
 
   ~Renderer() {}
@@ -148,8 +158,9 @@ struct Renderer {
     ib_ = h.ib;
 
     const auto eye = glm::identity<glm::mat4>();
-    const glm::mat4 scale = glm::scale(eye, glm::vec3(0.07F));
-    mvp_ = scale;
+    const glm::mat4 trans = glm::translate(eye, glm::vec3(0.F, 0.F, -0.7F));
+    const glm::mat4 scale = glm::scale(eye, glm::vec3(0.13F));
+    mv_mat_ = trans * scale;
   }
 
   void SetGlState() {
@@ -162,7 +173,7 @@ struct Renderer {
   }
 
   void Render(uint64_t time_ms) {
-    constexpr uint64_t ms_period = 1000;
+    constexpr uint64_t ms_period = 3000;
 
     const auto timer_start = std::chrono::high_resolution_clock::now();
 
@@ -181,7 +192,8 @@ struct Renderer {
                                           glm::vec3(0.F, 0.F, 1.F));
       const glm::mat4 rot_y = glm::rotate(glm::identity<glm::mat4>(),
                                           ang0 + ang, glm::vec3(0.F, 1.F, 0.F));
-      pipeline_->SetMvpMat(rot_z * trans_y * rot_y * mvp_);
+      pipeline_->SetMvpMat(rot_z * trans_y * rot_y * mv_mat_);
+      pipeline_->SetNormalMat(NormalTransformMat(mv_mat_));
       pipeline_->DrawTrianglesPadded(vb_, ib_);
     }
     pipeline_->End();

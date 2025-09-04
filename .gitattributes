@@ -1,1 +1,2 @@
 external/** linguist-vendored
+*.obj binary
